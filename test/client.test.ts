@@ -57,6 +57,30 @@ describe("PostLake client", () => {
     expect(calls[0].url).toBe("https://api.postlake.dev/v1/posts/post_1/refresh");
   });
 
+  it("inbox.sendMessage sends the account, text, and optional human-agent assertion", async () => {
+    const { fn, calls } = fakeFetch([{
+      body: {
+        id: "msg_1",
+        text: "Your booking is confirmed.",
+        createdAt: "2026-09-06T00:00:00.000Z",
+        from: { handle: "postlake", displayName: "PostLake", avatarUrl: null },
+        fromMe: true,
+      },
+    }]);
+    await client(fn).inbox.sendMessage("thread/one", {
+      account: "acc_facebook",
+      text: "Your booking is confirmed.",
+      humanAgent: true,
+    });
+    expect(calls[0].init.method).toBe("POST");
+    expect(calls[0].url).toBe("https://api.postlake.dev/v1/conversations/thread%2Fone/messages");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      account: "acc_facebook",
+      text: "Your booking is confirmed.",
+      humanAgent: true,
+    });
+  });
+
   it("posts.list maps {posts,nextCursor} → {data,nextCursor} and passes query", async () => {
     const { fn, calls } = fakeFetch([{ body: { posts: [{ id: "post_1" }], nextCursor: "post_1" } }]);
     const page = await client(fn).posts.list({ limit: 10 });

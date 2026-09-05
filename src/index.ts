@@ -721,6 +721,9 @@ class Inbox {
 
   /** Send a message into a conversation.
    *
+   *  Sending on X costs 6 credits. Sending on Facebook, Instagram, and
+   *  Bluesky does not spend credits.
+   *
    *  `humanAgent` asserts that a PERSON wrote this reply. Meta only allows a
    *  reply within 24 hours of someone's last message; the Human Agent tag
    *  extends that to 7 days, and Meta grants it strictly for replies a human

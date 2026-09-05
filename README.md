@@ -198,6 +198,30 @@ if (page.problems.length) {
 The same applies to `hideComment`: if it throws, the reply is **still visible**.
 Treat the error as "still there", never as "probably fine".
 
+### Direct messages
+
+Facebook, Instagram, X, and Bluesky share the same conversation methods:
+
+```ts
+const conversations = await pl.inbox.conversations();
+const thread = conversations.items[0];
+const messages = await pl.inbox.messages(thread.id, { account: thread.account });
+
+await pl.inbox.sendMessage(thread.id, {
+  account: thread.account,
+  text: "Thanks for getting in touch.",
+});
+await pl.inbox.markConversationRead(thread.id, { account: thread.account });
+```
+
+Always inspect `problems` before reporting that the inbox is empty. A message
+may have an optional `content` object for an attachment, shared media, or an
+unsupported provider payload even when `text` is empty.
+
+Facebook and Instagram can produce `message.received` webhooks. Poll
+`pl.inbox.conversations()` for X and Bluesky. Sending a DM on X costs 6
+credits; sending on the other supported inbox networks does not spend credits.
+
 ## Cross-platform analytics in one shape
 
 Impressions, reach, engagement, CTR, saves and follower growth, normalised across networks so they can actually be compared.
