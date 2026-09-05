@@ -10,15 +10,40 @@
 
 import type {
   Account,
+  AdAccount,
+  BrandedContentPartner,
   AnalyticsResponse,
+  AuditEvent,
+  Comment,
   ConnectedAccount,
+  TargetOption,
+  Conversation,
+  Credential,
   CreatePostInput,
+  DiscoveredPost,
+  EmailPreferences,
+  EngageAction,
+  Limits,
+  MarketplaceCreator,
   MediaAsset,
+  Message,
+  MultiPage,
   NormalisedError,
+  Notification,
   Page,
+  Place,
   Platform,
+  PlatformCapabilities,
   Post,
   PostAnalytics,
+  PostSearch,
+  Profile,
+  PublicProfile,
+  PublishInfo,
+  ReadProblem,
+  ShopProduct,
+  SignedLink,
+  SocialActor,
   ValidatePostResult,
   WebhookEndpoint,
 } from "./types.js";
@@ -82,6 +107,20 @@ export class PostLake {
   readonly analytics: Analytics;
   readonly media: Media;
   readonly webhooks: Webhooks;
+  /** Reading your own corner of each network: notifications, comments, DMs,
+   *  followers, and acting on what you find. */
+  readonly inbox: Inbox;
+  /** Reading the PUBLIC network: search, look someone up, find a place. This is
+   *  what lets an agent look before it speaks rather than only broadcasting. */
+  readonly discover: Discover;
+  /** What each network supports right now: limits, media rules, valid options,
+   *  and where a network has more than one way in, the ways. Read this instead
+   *  of hard-coding a limit that the network will change without telling you. */
+  readonly platforms: Platforms;
+  /** Named groups of channels you can post to by name. */
+  readonly profiles: Profiles;
+  /** Your own platform app keys (BYOK / white-label). */
+  readonly credentials: Credentials;
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -100,6 +139,11 @@ export class PostLake {
     this.analytics = new Analytics(this);
     this.media = new Media(this);
     this.webhooks = new Webhooks(this);
+    this.inbox = new Inbox(this);
+    this.discover = new Discover(this);
+    this.platforms = new Platforms(this);
+    this.profiles = new Profiles(this);
+    this.credentials = new Credentials(this);
   }
 
   /** The authenticated account (id, email, supported platforms, optional timezone). */
@@ -109,6 +153,44 @@ export class PostLake {
   /** Set or clear the account default timezone. */
   updateMe(patch: { timezone?: string | null }): Promise<Account> {
     return this.request<Account>("PATCH", "/v1/me", { body: patch });
+  }
+
+  /** What this key may do right now: credits left, the plan's allowance, and
+   *  any agent guardrails. Read it before planning a batch rather than finding
+   *  the limit by being refused halfway through one. */
+  limits(): Promise<Limits> {
+    return this.request<Limits>("GET", "/v1/me/limits");
+  }
+
+  /** Mint a short-lived link to the hosted connect page and hand it to whoever
+   *  owns the accounts. Every network makes a PERSON approve access on its own
+   *  screen, so this is how an agent gets a channel connected without ever
+   *  handling someone's credentials. */
+  connectLink(input: { profile?: string } = {}): Promise<SignedLink> {
+    return this.request<SignedLink>("POST", "/v1/connect-link", { body: input });
+  }
+
+  /** Mint a longer-lived link to the full dashboard. */
+  appLink(): Promise<SignedLink> {
+    return this.request<SignedLink>("POST", "/v1/app-link");
+  }
+
+  /** Read the account's email preferences, or change the digest frequency. */
+  emailPreferences(): Promise<EmailPreferences> {
+    return this.request<EmailPreferences>("GET", "/v1/email-preferences");
+  }
+  updateEmailPreferences(patch: { digestFrequency: "off" | "weekly" | "daily" }): Promise<EmailPreferences> {
+    return this.request<EmailPreferences>("PATCH", "/v1/email-preferences", { body: patch });
+  }
+
+  /** The security log: sign-ins, key creation, connections, deletions. */
+  audit(): Promise<AuditEvent[]> {
+    return this.request<{ events: AuditEvent[] }>("GET", "/v1/audit").then((r) => r.events);
+  }
+
+  /** Everything this account holds, in one JSON document. */
+  export(): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>("GET", "/v1/account/export");
   }
 
   /** @internal */
@@ -154,8 +236,49 @@ class Posts {
   create(input: CreatePostInput, opts: { idempotencyKey?: string } = {}): Promise<Post> {
     return this.c.request<Post>("POST", "/v1/posts", { body: input, idempotencyKey: opts.idempotencyKey });
   }
+
+  /** Save without sending. The post comes back in state `draft`: nothing is
+   *  charged, no network is contacted, and it may be incomplete. This is the
+   *  approve-before-publish shape, so it is what you want when a person should
+   *  see the post before the world does. Publish it later with `publish()`. */
+  draft(input: CreatePostInput): Promise<Post> {
+    return this.c.request<Post>("POST", "/v1/posts", { body: { ...input, draft: true } });
+  }
+
+  /** Send a saved draft: now, or at `scheduledAt`. The draft's own text, media,
+   *  overrides and destinations are used, so none of it is resent.
+   *
+   *  Omitting `scheduledAt` keeps whatever time the draft was carrying; pass
+   *  `null` to clear it and publish immediately.
+   *
+   *  The draft is consumed only if something actually published. If nothing did,
+   *  it is left exactly where it was, so a failed attempt never costs you the
+   *  work. If some networks took it and others did not, the draft IS consumed:
+   *  publishing again would double-post where it worked. */
+  publish(
+    id: string,
+    options: {
+      scheduledAt?: string | null;
+      timezone?: string;
+      accounts?: string[];
+      profile?: string;
+      platforms?: Platform[];
+    } = {},
+  ): Promise<Post> {
+    return this.c.request<Post>("POST", `/v1/posts/${encodeURIComponent(id)}/publish`, { body: options });
+  }
   get(id: string): Promise<Post> {
     return this.c.request<Post>("GET", `/v1/posts/${encodeURIComponent(id)}`);
+  }
+
+  /** Ask an async network for this post's state now.
+   *
+   *  After YouTube (and anything else that accepts a post as `processing`)
+   *  this promotes a confirmed post to `published` immediately, instead of
+   *  waiting for the background recovery path. Failures and credit refunds
+   *  still settle there. */
+  refresh(id: string): Promise<Post> {
+    return this.c.request<Post>("POST", `/v1/posts/${encodeURIComponent(id)}/refresh`);
   }
 
   /** Dry run. Runs exactly the checks a real publish runs (account resolution,
@@ -178,7 +301,12 @@ class Posts {
       cursor = page.nextCursor ?? undefined;
     } while (cursor);
   }
-  /** Edit a scheduled post (text/media/platformOptions/scheduledAt/timezone). */
+  /** Edit a post that has not gone out: a scheduled one, or a draft.
+   *
+   *  A scheduled post keeps its destinations and must stay in the future. A
+   *  draft is laxer in every direction, because being unfinished is what a
+   *  draft is for: `accounts`, `thread` and `firstComment` are editable too,
+   *  and nothing is checked until it publishes. */
   update(
     id: string,
     patch: Partial<Pick<CreatePostInput, "text" | "media" | "scheduledAt" | "timezone" | "platformOptions">> & {
@@ -186,12 +314,20 @@ class Posts {
       mediaAlt?: string[];
       mediaOverrides?: Partial<Record<Platform, string[]>>;
       mediaAltOverrides?: Partial<Record<Platform, string[]>>;
+      /** Drafts only. Replaces the draft's destinations. */
+      accounts?: string[];
+      /** Drafts only. An empty array removes the thread. */
+      thread?: string[];
+      /** Drafts only. An empty string removes the first comment. */
+      firstComment?: string;
+      /** Drafts only. */
+      firstCommentOverrides?: Partial<Record<Platform, string>>;
     },
   ): Promise<Post> {
     return this.c.request<Post>("PATCH", `/v1/posts/${encodeURIComponent(id)}`, { body: patch });
   }
-  /** Cancel a scheduled post. */
-  cancel(id: string): Promise<{ id: string; cancelled: boolean }> {
+  /** Cancel a scheduled post, or discard a draft. Both are free. */
+  cancel(id: string): Promise<{ id: string; cancelled?: boolean; deleted?: boolean }> {
     return this.c.request("DELETE", `/v1/posts/${encodeURIComponent(id)}`);
   }
   /** Per-post normalised analytics (per-target + totals). */
@@ -222,8 +358,110 @@ class SocialAccounts {
   connect(input: { platform: Platform; profile?: string } & Record<string, unknown>): Promise<ConnectedAccount> {
     return this.c.request<ConnectedAccount>("POST", "/v1/social-accounts/connect", { body: input });
   }
-  targets(id: string): Promise<Array<{ id: string; name: string }>> {
-    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/targets`);
+  /** Live creator-level constraints, e.g. which privacy levels a TikTok creator
+   *  may choose right now. These change on the network's side, so read them
+   *  before offering someone a choice rather than caching one. */
+  publishInfo(id: string): Promise<PublishInfo> {
+    return this.c.request<PublishInfo>("GET", `/v1/social-accounts/${encodeURIComponent(id)}/publish-info`);
+  }
+
+  /** The shoppable products on this channel, so you can find the ids that the
+   *  `productIds` post option takes. A network without a shop answers with an
+   *  empty list rather than an error: you asked what could be tagged, and
+   *  "nothing" is a true answer. */
+  products(id: string, params: { q?: string; cursor?: string; limit?: number } = {}): Promise<{ items: ShopProduct[]; cursor: string | null }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/products`, { query: params });
+  }
+
+  /** This channel's OWN posts, read from the network rather than from our
+   *  records. `pl.posts.list()` returns what PostLake published; this returns
+   *  everything on the account, including posts made in the network's own app
+   *  before it was ever connected. */
+  posts(id: string, params: { cursor?: string; limit?: number } = {}): Promise<{ items: DiscoveredPost[]; cursor: string | null; platform: Platform }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/posts`, { query: params });
+  }
+
+  /** Posts somebody ELSE published that tagged this channel. Different from a
+   *  mention, which names you in text, and from your own posts. */
+  tagged(id: string, params: { cursor?: string; limit?: number } = {}): Promise<{ items: DiscoveredPost[]; cursor: string | null; platform: Platform }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/tagged`, { query: params });
+  }
+
+  /** How many posts this channel has left in the network's own window. Read it
+   *  before planning a batch: the alternative is finding the ceiling by being
+   *  refused partway through one, with some posts live and some not. */
+  allowance(id: string): Promise<{ used: number; limit: number; remaining: number; windowHours: number; platform: Platform }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/allowance`);
+  }
+
+  /** Scheduled events on this channel (a launch, a drop, a live). The id goes
+   *  in the `upcomingEventId` post option, which puts a reminder button on the
+   *  post. Events are created in the network's own app, not through the API. */
+  events(id: string): Promise<{ items: Array<{ id: string; title: string; startsAt: string | null; endsAt: string | null }>; cursor: string | null }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/events`);
+  }
+
+  /** Create a scheduled event. Instagram calls this a reminder, and its app only
+   *  offers one while composing a post. The API can create one outright, so an
+   *  agent can make the event AND attach it rather than needing a person to
+   *  prepare one first. The returned id goes in the `upcomingEventId` option. */
+  createEvent(id: string, input: { title: string; startsAt: string; endsAt?: string }): Promise<{ id: string; title: string; startsAt: string | null; endsAt: string | null }> {
+    return this.c.request("POST", `/v1/social-accounts/${encodeURIComponent(id)}/events`, { body: input });
+  }
+
+  /** Ad accounts this channel has authorised. Only an `active` one can be spent
+   *  against. Most channels have authorised none, which is an empty list. */
+  adAccounts(id: string): Promise<{ business: { id: string; name: string | null; verified: boolean | null } | null; adAccounts: AdAccount[] }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/ad-accounts`);
+  }
+
+  /** Branded content partners. `canPromote` is a SEPARATE grant that lets the
+   *  partner run the post as a paid ad; permission to tag does not imply it. */
+  brandedPartners(id: string): Promise<BrandedContentPartner[]> {
+    return this.c.request<{ partners: BrandedContentPartner[] }>("GET", `/v1/social-accounts/${encodeURIComponent(id)}/branded-partners`).then((r) => r.partners);
+  }
+
+  /** Subscribe this channel to Page webhooks. Facebook needs this per Page:
+   *  subscribing the app is not enough, and nothing is delivered without it. */
+  subscribeWebhook(id: string, fields?: string[]): Promise<{ subscribed: boolean; fields: string[] }> {
+    return this.c.request("POST", `/v1/social-accounts/${encodeURIComponent(id)}/webhook`, {
+      body: fields?.length ? { fields } : {},
+    });
+  }
+
+  /** Which events this channel currently receives. */
+  webhookSubscriptions(id: string): Promise<{ fields: string[] }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/webhook`);
+  }
+
+  /** Move a connected channel to another profile. */
+  moveToProfile(id: string, profile: string): Promise<{ account: string; profile: string }> {
+    return this.c.request("PATCH", `/v1/social-accounts/${encodeURIComponent(id)}/profile`, { body: { profile } });
+  }
+
+  /** Postable destinations inside one account: Pinterest boards and their
+   *  sections, Facebook Pages. This is also how a board id from a post record
+   *  becomes a name again, since a post stores the id it published to.
+   *
+   *  `privacy` is worth reading before you post: a secret board accepts a pin
+   *  and shows it to nobody. */
+  async targets(id: string): Promise<TargetOption[]> {
+    const r = await this.c.request<{ targets: TargetOption[] }>(
+      "GET",
+      `/v1/social-accounts/${encodeURIComponent(id)}/targets`,
+    );
+    return r.targets;
+  }
+
+  /** One connected account, including what it can SEARCH.
+   *
+   *  Call it before a discovery request: `discovers` answers per ACCOUNT, and
+   *  a `blocked` object means the network has already refused, with the step a
+   *  person has to take. That is cheaper than making the call and reading the
+   *  error, and it is the only way to know which door an Instagram came
+   *  through. */
+  get(id: string): Promise<ConnectedAccount> {
+    return this.c.request<ConnectedAccount>("GET", `/v1/social-accounts/${encodeURIComponent(id)}`);
   }
 }
 
@@ -327,5 +565,219 @@ class Webhooks {
    */
   verify(secret: string, rawBody: string, signatureHeader: string | null | undefined, opts?: { toleranceSec?: number }): Promise<boolean> {
     return verifyWebhookSignature(secret, rawBody, signatureHeader, opts);
+  }
+}
+
+
+/** Your own corner of each network.
+ *
+ *  Every list here returns `problems` next to the items. Read it: an empty
+ *  `items` with a non-empty `problems` means a network could not be reached,
+ *  not that nothing happened, and treating those the same is how an agent ends
+ *  up reporting a quiet day during an outage.
+ */
+class Platforms {
+  constructor(private readonly c: PostLake) {}
+
+  /** Every network's capabilities in one call. */
+  list(): Promise<PlatformCapabilities[]> {
+    return this.c.request<{ platforms: PlatformCapabilities[] }>("GET", "/v1/platforms").then((r) => r.platforms);
+  }
+
+  /** One network's capabilities. `variants` tells you where a network has more
+   *  than one way in, and what each way unlocks. */
+  get(platform: Platform): Promise<PlatformCapabilities> {
+    return this.c.request<PlatformCapabilities>("GET", `/v1/platforms/${encodeURIComponent(platform)}`);
+  }
+}
+
+class Profiles {
+  constructor(private readonly c: PostLake) {}
+
+  list(): Promise<Profile[]> {
+    return this.c.request<{ profiles: Profile[] }>("GET", "/v1/profiles").then((r) => r.profiles);
+  }
+
+  create(input: { name: string }): Promise<Profile> {
+    return this.c.request<Profile>("POST", "/v1/profiles", { body: input });
+  }
+
+  /** Rename a profile. The username derived from the name changes with it, so
+   *  the answer says what the old one was: anything posting by the old name
+   *  needs updating. */
+  rename(id: string, name: string): Promise<{ profile: Profile; previousUsername?: string; usernameChanged?: boolean }> {
+    return this.c.request("PATCH", `/v1/profiles/${encodeURIComponent(id)}`, { body: { name } });
+  }
+
+  /** Delete a profile. The channels connected to it go too, and the answer
+   *  names them rather than leaving you to find out. */
+  delete(id: string): Promise<{ deleted: boolean; disconnected?: string[] }> {
+    return this.c.request("DELETE", `/v1/profiles/${encodeURIComponent(id)}`);
+  }
+}
+
+class Credentials {
+  constructor(private readonly c: PostLake) {}
+
+  /** Which platforms have your own app keys stored. The secret is never
+   *  returned, only the fact that one is there. */
+  list(): Promise<Credential[]> {
+    return this.c.request<{ credentials: Credential[] }>("GET", "/v1/credentials").then((r) => r.credentials);
+  }
+
+  set(input: { platform: Platform; clientId: string; clientSecret: string }): Promise<Credential> {
+    return this.c.request<{ credential: Credential }>("POST", "/v1/credentials", { body: input }).then((r) => r.credential);
+  }
+
+  /** Remove your keys for one platform and fall back to PostLake's managed app. */
+  delete(platform: Platform): Promise<void> {
+    return this.c.request<void>("DELETE", `/v1/credentials/${encodeURIComponent(platform)}`);
+  }
+}
+
+class Inbox {
+  constructor(private readonly c: PostLake) {}
+
+  /** Likes, replies, mentions and follows, merged across every network that has
+   *  a notifications feed. Pass `account` to read just one. */
+  notifications(params: { account?: string; cursor?: string; limit?: number } = {}): Promise<MultiPage<Notification>> {
+    return this.c.request<MultiPage<Notification>>("GET", "/v1/notifications", { query: params });
+  }
+
+  /** Mark everything up to now as seen, on the networks that track that. */
+  markNotificationsSeen(params: { account?: string } = {}): Promise<{ marked: Platform[]; problems: ReadProblem[] }> {
+    return this.c.request("POST", "/v1/notifications/seen", { query: params });
+  }
+
+  /** Replies on a post you published, across every network it went to. Takes
+   *  the PostLake post id (post_…), not a network id. */
+  comments(postId: string, params: { cursor?: string; limit?: number; nested?: boolean } = {}): Promise<MultiPage<Comment>> {
+    const { nested, ...rest } = params;
+    return this.c.request<MultiPage<Comment>>("GET", `/v1/posts/${encodeURIComponent(postId)}/comments`, {
+      // The whole thread rather than only the top level, where the network can
+      // go deeper. Sent only when asked, so the default stays the network's.
+      query: { ...rest, ...(nested ? { nested: "true" } : {}) },
+    });
+  }
+
+  /** Reply to someone else's comment, by that comment's id. */
+  reply(commentId: string, input: { account: string; text: string }): Promise<{ account: string; platform: Platform; id?: string; ok: true }> {
+    return this.c.request("POST", `/v1/comments/${encodeURIComponent(commentId)}/replies`, { body: input });
+  }
+
+  /** Hide a reply on your own post, or unhide one you hid.
+   *
+   *  The other half of moderating a comment section: without it the only answer
+   *  to an abusive reply is to reply to it. A rejected call means the reply is
+   *  STILL VISIBLE, so treat an error as "still there". */
+  hideComment(commentId: string, input: { account: string; hidden?: boolean }): Promise<{ account: string; platform: Platform; hidden: boolean; ok: true }> {
+    return this.c.request("POST", `/v1/comments/${encodeURIComponent(commentId)}/hide`, {
+      body: { account: input.account, hidden: input.hidden ?? true },
+    });
+  }
+
+  /** Delete a comment on one of your own posts.
+   *
+   *  The irreversible half of moderating a comment section. Facebook cannot
+   *  hide a Page's own comment, so this is how you take one of yours down. */
+  deleteComment(commentId: string, input: { account: string }): Promise<{ account: string; platform: Platform; ok: true }> {
+    return this.c.request("DELETE", `/v1/comments/${encodeURIComponent(commentId)}`, { body: input });
+  }
+
+  /** Like, repost, follow, block or mute. One vocabulary for every network. */
+  engage(input: { account: string; action: EngageAction; target: string }): Promise<{ account: string; platform: Platform; ok: true }> {
+    return this.c.request("POST", "/v1/engagements", { body: input });
+  }
+
+  /** Who follows a connected account. */
+  followers(accountId: string, params: { cursor?: string; limit?: number } = {}): Promise<MultiPage<SocialActor>> {
+    return this.c.request<MultiPage<SocialActor>>("GET", `/v1/social-accounts/${encodeURIComponent(accountId)}/followers`, { query: params });
+  }
+
+  /** Who a connected account follows. */
+  following(accountId: string, params: { cursor?: string; limit?: number } = {}): Promise<MultiPage<SocialActor>> {
+    return this.c.request<MultiPage<SocialActor>>("GET", `/v1/social-accounts/${encodeURIComponent(accountId)}/following`, { query: params });
+  }
+
+  /** Direct message threads. */
+  conversations(params: { account?: string; cursor?: string; limit?: number } = {}): Promise<MultiPage<Conversation>> {
+    return this.c.request<MultiPage<Conversation>>("GET", "/v1/conversations", { query: params });
+  }
+
+  /** Open (or find) a thread with someone, so a first message does not need a
+   *  conversation id that does not exist yet. */
+  openConversation(input: { account: string; handle: string }): Promise<Conversation> {
+    return this.c.request<Conversation>("POST", "/v1/conversations", { body: input });
+  }
+
+  /** Mark a conversation read, where the network tracks that. */
+  markConversationRead(conversationId: string, input: { account: string }): Promise<{ ok: true }> {
+    return this.c.request("POST", `/v1/conversations/${encodeURIComponent(conversationId)}/read`, { body: input });
+  }
+
+  messages(conversationId: string, params: { account: string; cursor?: string; limit?: number }): Promise<MultiPage<Message>> {
+    return this.c.request<MultiPage<Message>>("GET", `/v1/conversations/${encodeURIComponent(conversationId)}/messages`, { query: params });
+  }
+
+  /** Send a message into a conversation.
+   *
+   *  `humanAgent` asserts that a PERSON wrote this reply. Meta only allows a
+   *  reply within 24 hours of someone's last message; the Human Agent tag
+   *  extends that to 7 days, and Meta grants it strictly for replies a human
+   *  composed. Never set it on an automated reply: the penalty lands on the
+   *  connected account, not on the caller. */
+  sendMessage(conversationId: string, input: { account: string; text: string; humanAgent?: boolean }): Promise<Message> {
+    return this.c.request<Message>("POST", `/v1/conversations/${encodeURIComponent(conversationId)}/messages`, { body: input });
+  }
+}
+
+/** The public network, rather than your own corner of it. */
+class Discover {
+  constructor(private readonly c: PostLake) {}
+
+  /** Search public posts by keyword or topic tag, across every connected
+   *  network that can search. Networks that cannot are named in `problems`
+   *  rather than quietly omitted, which matters here more than anywhere: an
+   *  agent that reads "no results" as "nobody has said this" will go and say it. */
+  posts(query: PostSearch, params: { account?: string; cursor?: string; limit?: number } = {}): Promise<MultiPage<DiscoveredPost>> {
+    return this.c.request<MultiPage<DiscoveredPost>>("GET", "/v1/discover/posts", {
+      query: { ...query, ...params },
+    });
+  }
+
+  /** Auto-paginating iterator over a search. */
+  async *postsAll(query: PostSearch, params: { account?: string; limit?: number } = {}): AsyncGenerator<DiscoveredPost> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.posts(query, { ...params, cursor });
+      for (const p of page.items) yield p;
+      cursor = page.cursor ?? undefined;
+    } while (cursor);
+  }
+
+  /** Look someone up. Needs an account, because the same handle on two networks
+   *  is usually two different people and merging them would invent one. */
+  profile(handle: string, params: { account: string }): Promise<PublicProfile> {
+    return this.c.request<PublicProfile>("GET", `/v1/discover/profiles/${encodeURIComponent(handle)}`, { query: params });
+  }
+
+  /** Someone else's public posts, on one network. */
+  profilePosts(handle: string, params: { account: string; cursor?: string; limit?: number }): Promise<MultiPage<DiscoveredPost>> {
+    return this.c.request<MultiPage<DiscoveredPost>>("GET", `/v1/discover/profiles/${encodeURIComponent(handle)}/posts`, { query: params });
+  }
+
+  /** Search a network's creator marketplace for people to work with.
+   *
+   *  Until the app has Advanced Access from the network, results are SIMULATED
+   *  creators and each carries `sample: true`. Check it: acting on a sample
+   *  means pitching a partnership to somebody who does not exist. */
+  creators(params: { account: string; q?: string; countries?: string; interests?: string; limit?: number; cursor?: string }): Promise<{ items: MarketplaceCreator[]; cursor: string | null; platform: Platform }> {
+    return this.c.request("GET", "/v1/discover/creators", { query: params });
+  }
+
+  /** Find a place to tag on a post. Pass a name, or a latitude and longitude
+   *  together. The id goes in that network's `locationId` post option. */
+  places(params: { account: string; q?: string; latitude?: number; longitude?: number }): Promise<{ items: Place[]; platform: Platform }> {
+    return this.c.request("GET", "/v1/discover/places", { query: params });
   }
 }

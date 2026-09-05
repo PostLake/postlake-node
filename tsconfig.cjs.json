@@ -1,0 +1,17 @@
+{
+  // A second emit, CommonJS this time.
+  //
+  // The package is ESM-first and stays that way, but a CJS codebase asking for
+  // it used to get ERR_PACKAGE_PATH_NOT_EXPORTED, which names no cause and
+  // suggests nothing to try. Shipping both is a few kilobytes and removes a
+  // whole class of "it does not work" with no reply.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "dist/cjs",
+    // The .d.ts files from the ESM build serve both; emitting them twice only
+    // creates two copies that can disagree.
+    "declaration": false
+  }
+}

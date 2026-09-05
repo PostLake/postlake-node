@@ -1,16 +1,18 @@
 {
   "name": "postlake",
-  "version": "1.0.1",
+  "version": "1.7.1",
   "description": "Official TypeScript SDK for PostLake. One API to publish, schedule and track social posts across 9 platforms.",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/cjs/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -26,7 +28,7 @@
     "url": "https://github.com/PostLake/postlake-node/issues"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json', JSON.stringify({type:'commonjs'}))\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepublishOnly": "npm run build && npm test && npm run smoke",

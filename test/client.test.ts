@@ -49,6 +49,14 @@ describe("PostLake client", () => {
     expect(calls[0].init.method).toBe("POST");
   });
 
+  it("posts.refresh POSTs /v1/posts/{id}/refresh", async () => {
+    const { fn, calls } = fakeFetch([{ body: { id: "post_1", state: "published", targets: [] } }]);
+    const post = await client(fn).posts.refresh("post_1");
+    expect(post.state).toBe("published");
+    expect(calls[0].init.method).toBe("POST");
+    expect(calls[0].url).toBe("https://api.postlake.dev/v1/posts/post_1/refresh");
+  });
+
   it("posts.list maps {posts,nextCursor} → {data,nextCursor} and passes query", async () => {
     const { fn, calls } = fakeFetch([{ body: { posts: [{ id: "post_1" }], nextCursor: "post_1" } }]);
     const page = await client(fn).posts.list({ limit: 10 });

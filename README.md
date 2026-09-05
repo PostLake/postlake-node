@@ -63,16 +63,37 @@ const check = await pl.posts.validate({ text, accounts, media });
 if (!check.ok) console.log(check.issues); // per-network, with the fix for each
 ```
 
+**A person can stay in the loop.** Save the post instead of sending it, let someone read it, and publish it once they have. The draft costs nothing and reaches no network until it is published, and a publish where nothing lands leaves the draft intact rather than eating it.
+
+```ts
+const draft = await pl.posts.draft({ text: "Ship notes for Friday", accounts: ["acc_1"] });
+// ...someone reviews it, in the dashboard or wherever you surface it...
+await pl.posts.publish(draft.id);
+```
+
+**Async networks can sit in `processing`.** `get` reads what we already know. `refresh` asks the network now, so a YouTube upload can move to `published` without waiting for the background path.
+
+```ts
+const latest = await pl.posts.refresh(post.id);
+```
+
 ## What you can call
+
+`import { PostLake } from "postlake"` is the whole client. `PostLake` is the class. The package name is `postlake`.
 
 | Resource | Methods |
 |---|---|
-| `pl.posts` | `create`, `validate`, `get`, `list`, `listAll`, `update`, `cancel`, `analytics` |
-| `pl.socialAccounts` | `list`, `listAll`, `connect`, `targets` |
+| `pl.posts` | `create`, `draft`, `publish`, `validate`, `get`, `refresh`, `list`, `listAll`, `update`, `cancel`, `analytics` |
+| `pl.socialAccounts` | `list`, `listAll`, `get`, `connect`, `targets`, `publishInfo`, `products`, `posts`, `tagged`, `allowance`, `events`, `createEvent`, `adAccounts`, `brandedPartners`, `subscribeWebhook`, `webhookSubscriptions`, `moveToProfile` |
 | `pl.analytics` | `get` |
-| `pl.media` | `upload` |
-| `pl.webhooks` | `create`, `list`, `delete` |
-| `pl` | `me()` |
+| `pl.media` | `upload`, `prepareBatch` |
+| `pl.webhooks` | `create`, `list`, `delete`, `verify` |
+| `pl.inbox` | `notifications`, `markNotificationsSeen`, `comments`, `reply`, `hideComment`, `deleteComment`, `engage`, `followers`, `following`, `conversations`, `openConversation`, `markConversationRead`, `messages`, `sendMessage` |
+| `pl.discover` | `posts`, `postsAll`, `profile`, `profilePosts`, `creators`, `places` |
+| `pl.platforms` | `list`, `get` |
+| `pl.profiles` | `list`, `create`, `rename`, `delete` |
+| `pl.credentials` | `list`, `set`, `delete` |
+| `pl` | `me`, `updateMe`, `limits`, `connectLink`, `appLink`, `emailPreferences`, `updateEmailPreferences`, `audit`, `export` |
 
 `list` returns one page; `listAll` is an async iterator over everything:
 
@@ -81,6 +102,101 @@ for await (const post of pl.posts.listAll()) {
   console.log(post.id, post.state);
 }
 ```
+
+### Ask the network, don't hard-code it
+
+Limits move, and a network can have more than one door. `pl.platforms.get()`
+answers both, live:
+
+```ts
+const ig = await pl.platforms.get("instagram");
+ig.maxChars;        // 2200
+ig.discovers?.posts; // can this connection search hashtags?
+
+for (const way of ig.variants ?? []) {
+  console.log(way.label, way.summary, way.requires);
+}
+```
+
+What a connection can do depends on how it was made, not only on which network
+it is. An Instagram account connected through Facebook can search hashtags and
+read insights. The same account connected directly cannot. `variants` is where
+that is written down, and it is the same field the connect screen is built from.
+
+### Getting an account connected
+
+Every network makes a person approve access on its own screen, and no API can do
+that for them. So an agent mints a link and hands it over:
+
+```ts
+const { url } = await pl.connectLink({ profile: "my-brand" });
+// Give `url` to whoever owns the accounts. It expires in 30 minutes.
+```
+
+## Look before you speak
+
+Publishing is half of it. An agent that can only broadcast will happily post
+something the room said an hour ago. So the same client reads the network.
+
+```ts
+// Is anyone already saying this?
+const found = await pl.discover.posts({ q: "social media api", sort: "recent" });
+
+// Who is this person, before we reply to them?
+const them = await pl.discover.profile("someone", { account: "acc_1" });
+```
+
+## Read your own corner, and answer it
+
+```ts
+const inbox = await pl.inbox.notifications();
+for (const n of inbox.items) {
+  if (n.type === "mention") {
+    await pl.inbox.reply(n.id, { account: n.account, text: "thanks for the tag" });
+  }
+}
+
+// Moderation is the other half of replying.
+await pl.inbox.hideComment("comment_id", { account: "acc_1" });
+await pl.inbox.deleteComment("comment_id", { account: "acc_1" });
+```
+
+### Hidden replies
+
+`hideComment` is the other half of replying. Reading is the other half of that:
+every comment carries `hidden`, so an agent can tell what it has already dealt
+with.
+
+```ts
+const page = await pl.inbox.comments("post_123", { nested: true });
+for (const c of page.items) {
+  if (c.hidden === null) continue;   // this network does not say. Not the same as false.
+  if (!c.hidden && looksAbusive(c.text)) {
+    await pl.inbox.hideComment(c.id, { account: "acc_1" });
+  }
+}
+```
+
+`nested: true` reads replies to replies as well. Networks that cannot go deeper
+return the top level rather than refusing, so it is always safe to ask.
+
+### Always read `problems`
+
+Every cross-network read returns `problems` beside `items`. It names the
+networks that could not be read, and it is the point of these calls rather than
+decoration: without it, an empty `items` from a two-network read is
+indistinguishable from a read where one network was never asked.
+
+```ts
+const page = await pl.inbox.notifications();
+if (page.problems.length) {
+  // Do NOT report "nothing new" here. Something went unread.
+  console.warn(page.problems.map((p) => `${p.platform}: ${p.reason}`));
+}
+```
+
+The same applies to `hideComment`: if it throws, the reply is **still visible**.
+Treat the error as "still there", never as "probably fine".
 
 ## Cross-platform analytics in one shape
 
@@ -139,9 +255,9 @@ For coding agents there are ready-made skills:
 npx skills add postlake/postlake-mcp --all
 ```
 
-## Pricing
+## Try for free
 
-Free to start: 20 credits a month, no card. Paid plans start at $13/month for 2,000 posts. Unlimited connected accounts on every plan. [Full pricing](https://postlake.dev/pricing).
+[Get started](https://postlake.dev) and create an API key. No card required.
 
 ## Links
 
