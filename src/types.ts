@@ -320,6 +320,15 @@ export interface Account {
   timezone?: string;
 }
 
+/** The authenticated key's display identity. The credential name and id never change. */
+export interface AgentIdentity {
+  id: string;
+  name: string;
+  clientName: string;
+  nickname: string | null;
+  nicknameLocked: boolean;
+}
+
 /** A page of results from a cursor-paginated list. */
 export interface Page<T> {
   data: T[];
@@ -595,6 +604,7 @@ export interface Limits {
   account: string;
   email?: string;
   name?: string;
+  agent?: { id: string; name?: string; nicknameLocked: boolean; [key: string]: unknown };
   credits?: {
     total?: number;
     monthly?: number;

@@ -71,6 +71,12 @@ const draft = await pl.posts.draft({ text: "Ship notes for Friday", accounts: ["
 await pl.posts.publish(draft.id);
 ```
 
+**An agent can name itself.** Its display name appears in Agent Control and post attribution. The account owner can lock the name, and renaming does not change the API key or OAuth client identity.
+
+```ts
+await pl.setAgentName("Sofia scheduler");
+```
+
 **Async networks can sit in `processing`.** `get` reads what we already know. `refresh` asks the network now, so a YouTube upload can move to `published` without waiting for the background path.
 
 ```ts
@@ -93,7 +99,7 @@ const latest = await pl.posts.refresh(post.id);
 | `pl.platforms` | `list`, `get` |
 | `pl.profiles` | `list`, `create`, `rename`, `delete` |
 | `pl.credentials` | `list`, `set`, `delete` |
-| `pl` | `me`, `updateMe`, `limits`, `connectLink`, `appLink`, `emailPreferences`, `updateEmailPreferences`, `audit`, `export` |
+| `pl` | `me`, `updateMe`, `limits`, `setAgentName`, `connectLink`, `appLink`, `emailPreferences`, `updateEmailPreferences`, `audit`, `export` |
 
 `list` returns one page; `listAll` is an async iterator over everything:
 

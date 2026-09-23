@@ -38,6 +38,15 @@ describe("PostLake client", () => {
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer sk_live_test");
   });
 
+  it("names only the authenticated agent", async () => {
+    const identity = { id: "key_1", name: "Scheduler", clientName: "Original key", nickname: "Scheduler", nicknameLocked: false };
+    const { fn, calls } = fakeFetch([{ body: identity }]);
+    expect(await client(fn).setAgentName("Scheduler")).toEqual(identity);
+    expect(calls[0].url).toBe("https://api.postlake.dev/v1/me/agent");
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ nickname: "Scheduler" });
+  });
+
   it("posts.create sends JSON + an idempotency key", async () => {
     const { fn, calls } = fakeFetch([{ status: 201, body: { id: "post_1", state: "published", targets: [] } }]);
     const post = await client(fn).posts.create({ text: "hi", accounts: ["acc_1"] }, { idempotencyKey: "key-123" });

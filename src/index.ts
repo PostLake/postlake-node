@@ -10,6 +10,7 @@
 
 import type {
   Account,
+  AgentIdentity,
   AdAccount,
   BrandedContentPartner,
   AnalyticsResponse,
@@ -167,6 +168,11 @@ export class PostLake {
    *  the limit by being refused halfway through one. */
   limits(): Promise<Limits> {
     return this.request<Limits>("GET", "/v1/me/limits");
+  }
+
+  /** Name this API-key agent. The owner can lock the display name in Agent Control. */
+  setAgentName(nickname: string | null): Promise<AgentIdentity> {
+    return this.request<AgentIdentity>("PATCH", "/v1/me/agent", { body: { nickname } });
   }
 
   /** Mint a short-lived link to the hosted connect page and hand it to whoever
