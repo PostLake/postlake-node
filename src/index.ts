@@ -24,6 +24,7 @@ import type {
   EmailPreferences,
   EngageAction,
   Limits,
+  LiveBroadcast,
   MarketplaceCreator,
   MediaAsset,
   Message,
@@ -36,6 +37,7 @@ import type {
   PlatformCapabilities,
   Post,
   PostAnalytics,
+  PostListParams,
   PostSearch,
   Profile,
   PublicProfile,
@@ -46,6 +48,8 @@ import type {
   SocialActor,
   ValidatePostResult,
   WebhookEndpoint,
+  WebhookDelivery,
+  ChangelogEntry,
 } from "./types.js";
 
 export * from "./types.js";
@@ -121,6 +125,8 @@ export class PostLake {
   readonly profiles: Profiles;
   /** Your own platform app keys (BYOK / white-label). */
   readonly credentials: Credentials;
+  /** The public product release feed, useful when an agent plans against what changed. */
+  readonly changelog: Changelog;
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -144,6 +150,7 @@ export class PostLake {
     this.platforms = new Platforms(this);
     this.profiles = new Profiles(this);
     this.credentials = new Credentials(this);
+    this.changelog = new Changelog(this);
   }
 
   /** The authenticated account (id, email, supported platforms, optional timezone). */
@@ -166,8 +173,15 @@ export class PostLake {
    *  owns the accounts. Every network makes a PERSON approve access on its own
    *  screen, so this is how an agent gets a channel connected without ever
    *  handling someone's credentials. */
-  connectLink(input: { profile?: string } = {}): Promise<SignedLink> {
+  connectLink(input: { profile?: string; returnUrl?: string; platforms?: string[] } = {}): Promise<SignedLink> {
     return this.request<SignedLink>("POST", "/v1/connect-link", { body: input });
+  }
+
+  /** Mint a tenant-scoped connect link for a product's customer. This is the
+   * multi-user integration path: create and retain one profile per customer,
+   * then generate this link only from your backend. */
+  connectCustomerLink(input: { profile: string; returnUrl: string; platforms?: string[] }): Promise<SignedLink> {
+    return this.connectLink(input);
   }
 
   /** Mint a longer-lived link to the full dashboard. */
@@ -288,12 +302,12 @@ class Posts {
     return this.c.request<ValidatePostResult>("POST", "/v1/posts/validate", { body: input });
   }
   /** One page of posts, most recent first. */
-  async list(params: { limit?: number; cursor?: string; state?: string; account?: string; profile?: string } = {}): Promise<Page<Post>> {
-    const r = await this.c.request<{ posts: Post[]; nextCursor: string | null }>("GET", "/v1/posts", { query: params });
+  async list(params: PostListParams = {}): Promise<Page<Post>> {
+    const r = await this.c.request<{ posts: Post[]; nextCursor: string | null }>("GET", "/v1/posts", { query: { ...params } });
     return { data: r.posts, nextCursor: r.nextCursor };
   }
   /** Auto-paginating async iterator over every post. */
-  async *listAll(params: { limit?: number; state?: string; account?: string; profile?: string } = {}): AsyncGenerator<Post> {
+  async *listAll(params: Omit<PostListParams, "cursor"> = {}): AsyncGenerator<Post> {
     let cursor: string | undefined;
     do {
       const page = await this.list({ ...params, cursor });
@@ -316,6 +330,9 @@ class Posts {
       mediaAltOverrides?: Partial<Record<Platform, string[]>>;
       /** Drafts only. Replaces the draft's destinations. */
       accounts?: string[];
+      /** Scheduled posts only. Maps a missing target's old acc_ id to the exact
+       * connected channel that should replace it. */
+      targetAccounts?: Record<string, string>;
       /** Drafts only. An empty array removes the thread. */
       thread?: string[];
       /** Drafts only. An empty string removes the first comment. */
@@ -339,7 +356,7 @@ class Posts {
 class SocialAccounts {
   constructor(private readonly c: PostLake) {}
 
-  async list(params: { limit?: number; cursor?: string } = {}): Promise<Page<ConnectedAccount>> {
+  async list(params: { limit?: number; cursor?: string; profile?: string } = {}): Promise<Page<ConnectedAccount>> {
     const r = await this.c.request<{ accounts: ConnectedAccount[]; nextCursor: string | null }>(
       "GET",
       "/v1/social-accounts",
@@ -357,6 +374,12 @@ class SocialAccounts {
   }
   connect(input: { platform: Platform; profile?: string } & Record<string, unknown>): Promise<ConnectedAccount> {
     return this.c.request<ConnectedAccount>("POST", "/v1/social-accounts/connect", { body: input });
+  }
+  /** Revoke the provider grant when possible, drop the connection, and fire
+   *  `account.disconnected`. Use this from your backend when a person
+   *  disconnects inside your app. */
+  disconnect(id: string): Promise<{ id: string; disconnected: true; platform: string; handle: string; profileId?: string }> {
+    return this.c.request("DELETE", `/v1/social-accounts/${encodeURIComponent(id)}`);
   }
   /** Live creator-level constraints, e.g. which privacy levels a TikTok creator
    *  may choose right now. These change on the network's side, so read them
@@ -453,6 +476,42 @@ class SocialAccounts {
     return r.targets;
   }
 
+  /** Find an eligible Facebook Page to mention in a Facebook post. Meta can
+   * gate lookup until Page Mentioning is approved; the response then explains
+   * that the Page's numeric id is needed instead. */
+  searchFacebookPages(id: string, q: string): Promise<{ pages: Array<{ id: string; name: string; avatarUrl?: string }>; warning?: string }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/facebook-pages/search`, { query: { q } });
+  }
+
+  /** Prepare a Facebook Page live broadcast. Copy Facebook's returned secure
+   * ingest URL and any separate key into streaming software. PostLake never
+   * stores either credential. Start the encoder, then call startLiveBroadcast. */
+  createLiveBroadcast(id: string, input: { title: string; description?: string }): Promise<LiveBroadcast> {
+    return this.c.request("POST", `/v1/social-accounts/${encodeURIComponent(id)}/live-broadcasts`, { body: input });
+  }
+
+  /** Make a prepared Facebook Page broadcast visible now. The encoder must
+   * already be sending video to Facebook's one-time ingest destination. */
+  startLiveBroadcast(id: string, liveId: string): Promise<LiveBroadcast> {
+    return this.c.request("POST", `/v1/social-accounts/${encodeURIComponent(id)}/live-broadcasts/${encodeURIComponent(liveId)}/start`);
+  }
+
+  /** Current and recent Facebook live broadcasts. Ingest secrets are never
+   * returned by this read endpoint. */
+  listLiveBroadcasts(id: string, params: { limit?: number } = {}): Promise<{ items: LiveBroadcast[] }> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/live-broadcasts`, { query: params });
+  }
+
+  getLiveBroadcast(id: string, liveId: string): Promise<LiveBroadcast> {
+    return this.c.request("GET", `/v1/social-accounts/${encodeURIComponent(id)}/live-broadcasts/${encodeURIComponent(liveId)}`);
+  }
+
+  /** End a Facebook broadcast. Facebook retains the replay when its Page
+   * settings allow it, and `url` will carry that replay when available. */
+  endLiveBroadcast(id: string, liveId: string): Promise<LiveBroadcast> {
+    return this.c.request("POST", `/v1/social-accounts/${encodeURIComponent(id)}/live-broadcasts/${encodeURIComponent(liveId)}/end`);
+  }
+
   /** One connected account, including what it can SEARCH.
    *
    *  Call it before a discovery request: `discovers` answers per ACCOUNT, and
@@ -468,7 +527,7 @@ class SocialAccounts {
 class Analytics {
   constructor(private readonly c: PostLake) {}
   /** Cross-platform analytics for a period (e.g. "7d", "30d", "90d"). */
-  get(params: { period?: string } = {}): Promise<AnalyticsResponse> {
+  get(params: { period?: string; profile?: string } = {}): Promise<AnalyticsResponse> {
     return this.c.request<AnalyticsResponse>("GET", "/v1/analytics", { query: params });
   }
 }
@@ -559,12 +618,29 @@ class Webhooks {
   delete(id: string): Promise<{ id: string; deleted: boolean }> {
     return this.c.request("DELETE", `/v1/webhooks/${encodeURIComponent(id)}`);
   }
+  /** Pending and dead-lettered deliveries. Successful deliveries are removed from the retry queue. */
+  deliveries(status?: "pending" | "dead"): Promise<WebhookDelivery[]> {
+    return this.c.request<{ deliveries: WebhookDelivery[] }>("GET", "/v1/webhooks/deliveries", { query: { status } }).then((r) => r.deliveries);
+  }
+  replayDelivery(id: string): Promise<{ delivery: WebhookDelivery; delivered: boolean; status: number }> {
+    return this.c.request("POST", `/v1/webhooks/deliveries/${encodeURIComponent(id)}/replay`);
+  }
+  test(id: string): Promise<{ event: WebhookDelivery["event"]; delivery: { endpointId: string; ok: boolean; status: number } }> {
+    return this.c.request("POST", `/v1/webhooks/${encodeURIComponent(id)}/test`);
+  }
   /**
    * Verify a delivery's `postlake-signature` against the endpoint `secret`.
    * Pass the RAW request body. Convenience wrapper over {@link verifyWebhookSignature}.
    */
   verify(secret: string, rawBody: string, signatureHeader: string | null | undefined, opts?: { toleranceSec?: number }): Promise<boolean> {
     return verifyWebhookSignature(secret, rawBody, signatureHeader, opts);
+  }
+}
+
+class Changelog {
+  constructor(private readonly c: PostLake) {}
+  list(limit = 20): Promise<{ title: string; description: string; entries: ChangelogEntry[] }> {
+    return this.c.request("GET", "/v1/changelog", { query: { limit } });
   }
 }
 
@@ -769,12 +845,10 @@ class Discover {
     return this.c.request<MultiPage<DiscoveredPost>>("GET", `/v1/discover/profiles/${encodeURIComponent(handle)}/posts`, { query: params });
   }
 
-  /** Search a network's creator marketplace for people to work with.
-   *
-   *  Until the app has Advanced Access from the network, results are SIMULATED
-   *  creators and each carries `sample: true`. Check it: acting on a sample
-   *  means pitching a partnership to somebody who does not exist. */
-  creators(params: { account: string; q?: string; countries?: string; interests?: string; limit?: number; cursor?: string }): Promise<{ items: MarketplaceCreator[]; cursor: string | null; platform: Platform }> {
+  /** Search Instagram Creator Marketplace for people to work with. The account
+   *  must be connected through Facebook. Until PostLake has Meta Advanced
+   *  Access configured, every returned creator carries `sample: true`. */
+  creators(params: { account: string; q?: string; countries?: string; limit?: number; cursor?: string }): Promise<{ items: MarketplaceCreator[]; cursor: string | null; platform: Platform }> {
     return this.c.request("GET", "/v1/discover/creators", { query: params });
   }
 

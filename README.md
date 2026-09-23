@@ -84,7 +84,7 @@ const latest = await pl.posts.refresh(post.id);
 | Resource | Methods |
 |---|---|
 | `pl.posts` | `create`, `draft`, `publish`, `validate`, `get`, `refresh`, `list`, `listAll`, `update`, `cancel`, `analytics` |
-| `pl.socialAccounts` | `list`, `listAll`, `get`, `connect`, `targets`, `publishInfo`, `products`, `posts`, `tagged`, `allowance`, `events`, `createEvent`, `adAccounts`, `brandedPartners`, `subscribeWebhook`, `webhookSubscriptions`, `moveToProfile` |
+| `pl.socialAccounts` | `list`, `listAll`, `get`, `connect`, `disconnect`, `targets`, `publishInfo`, `products`, `posts`, `tagged`, `allowance`, `events`, `createEvent`, `adAccounts`, `brandedPartners`, `subscribeWebhook`, `webhookSubscriptions`, `moveToProfile` |
 | `pl.analytics` | `get` |
 | `pl.media` | `upload`, `prepareBatch` |
 | `pl.webhooks` | `create`, `list`, `delete`, `verify` |
@@ -129,9 +129,27 @@ Every network makes a person approve access on its own screen, and no API can do
 that for them. So an agent mints a link and hands it over:
 
 ```ts
-const { url } = await pl.connectLink({ profile: "my-brand" });
+const { url } = await pl.connectLink({
+  profile: "my-brand",
+  returnUrl: "https://yourapp.example/social-connected",
+});
 // Give `url` to whoever owns the accounts. It expires in 30 minutes.
+// After OAuth they land on returnUrl with connect_status=success|cancelled|error.
 ```
+
+For a multi-customer product, create one profile per customer and use the
+explicit tenant-scoped helper from your backend:
+
+```ts
+const { url } = await pl.connectCustomerLink({
+  profile: customerProfile.username,
+  returnUrl: "https://yourapp.example/social-connected",
+  platforms: ["instagram", "tiktok", "youtube"],
+});
+```
+
+Keep the API key on your server. The customer receives only the short-lived
+connection link, never a PostLake key or dashboard session.
 
 ## Look before you speak
 
@@ -241,7 +259,46 @@ await pl.posts.create({
 });
 ```
 
+## Add PostLake to a multi-user product
+
+Keep one PostLake key on your backend. Create one profile per customer, then
+send that customer through a short-lived connection link. PostLake manages the
+OAuth apps by default, so your customer never needs a PostLake login and your
+secret key never reaches their browser.
+
+```ts
+const customer = await pl.profiles.create({ name: "Acme workspace" });
+const { url } = await pl.connectLink({
+  profile: customer.username,
+  returnUrl: "https://yourapp.com/social-connected",
+  platforms: ["instagram", "tiktok", "linkedin"],
+});
+
+// Redirect the customer to `url`. After they return, read their channels:
+const channels = await pl.socialAccounts.list({ profile: customer.username });
+```
+
+Analytics and supported inbox reads use the same key and profile boundary.
+Publishing spends credits per successful network target. Connected accounts do
+not consume credits. BYOK is optional and only changes the app identity shown
+on a network's OAuth consent screen.
+
+Agent-aware post history is queryable through the same SDK:
+
+```ts
+const approvals = await pl.posts.list({
+  agent: "plc_cursor",
+  q: "launch",
+  approval: "pending",
+  from: "2026-09-01T00:00:00Z",
+});
+```
+
 ## The networks, and what each one will take
+
+Post history uses bounded cursor pagination. `q` searches caption text literally,
+without treating `%` or `_` as wildcards (case-insensitive, maximum 200 characters).
+Search and all filters apply before pagination. Date boundaries remain inclusive.
 
 Every network keeps its own rules, and they are further apart than people expect.
 

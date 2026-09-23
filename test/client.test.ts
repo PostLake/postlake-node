@@ -49,6 +49,22 @@ describe("PostLake client", () => {
     expect(calls[0].init.method).toBe("POST");
   });
 
+  it("connectCustomerLink always carries a customer profile and return URL", async () => {
+    const { fn, calls } = fakeFetch([{ body: { url: "https://api.postlake.dev/connect?token=test", expiresInSeconds: 1800 } }]);
+    const link = await client(fn).connectCustomerLink({
+      profile: "customer-42",
+      returnUrl: "https://example.com/social-connected",
+      platforms: ["tiktok", "youtube"],
+    });
+    expect(link.expiresInSeconds).toBe(1800);
+    expect(calls[0].url).toBe("https://api.postlake.dev/v1/connect-link");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      profile: "customer-42",
+      returnUrl: "https://example.com/social-connected",
+      platforms: ["tiktok", "youtube"],
+    });
+  });
+
   it("posts.refresh POSTs /v1/posts/{id}/refresh", async () => {
     const { fn, calls } = fakeFetch([{ body: { id: "post_1", state: "published", targets: [] } }]);
     const post = await client(fn).posts.refresh("post_1");
@@ -83,10 +99,26 @@ describe("PostLake client", () => {
 
   it("posts.list maps {posts,nextCursor} → {data,nextCursor} and passes query", async () => {
     const { fn, calls } = fakeFetch([{ body: { posts: [{ id: "post_1" }], nextCursor: "post_1" } }]);
-    const page = await client(fn).posts.list({ limit: 10 });
+    const page = await client(fn).posts.list({
+      limit: 10,
+      agent: "plc_cursor",
+      q: "100%_ready",
+      surface: "agent",
+      approval: "pending",
+      network: "tiktok",
+      from: "2026-09-01T00:00:00Z",
+      to: "2026-09-30T23:59:59Z",
+    });
     expect(page.data).toHaveLength(1);
     expect(page.nextCursor).toBe("post_1");
     expect(calls[0].url).toContain("limit=10");
+    expect(calls[0].url).toContain("agent=plc_cursor");
+    expect(calls[0].url).toContain("q=100%25_ready");
+    expect(calls[0].url).toContain("surface=agent");
+    expect(calls[0].url).toContain("approval=pending");
+    expect(calls[0].url).toContain("network=tiktok");
+    expect(calls[0].url).toContain("from=2026-09-01T00%3A00%3A00Z");
+    expect(calls[0].url).toContain("to=2026-09-30T23%3A59%3A59Z");
   });
 
   it("posts.listAll auto-paginates across pages then stops", async () => {

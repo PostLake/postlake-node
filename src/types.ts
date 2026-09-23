@@ -14,6 +14,8 @@ export type Platform =
 
 export type PostState =
   | "draft" // saved, never sent, and costing nothing until you publish it
+  | "awaiting_approval" // submitted by a guarded agent; a person must decide before it can be sent
+  | "rejected" // reviewed by a person and deliberately not sent
   | "queued" // accepted, not yet sent
   | "scheduled" // will publish at scheduledAt
   | "processing" // accepted by an async network (TikTok, Instagram); awaiting confirmation
@@ -69,6 +71,9 @@ export interface PinterestOptions {
    *  is opened. Falls back to the post text when unset. */
   title?: string;
   altText?: string;
+  /** Optional media id for a custom video cover. Without one, PostLake creates
+   *  a JPEG cover from the video at one second before publishing. */
+  thumbnail?: string;
 }
 export interface TikTokOptions {
   mode?: "direct" | "inbox";
@@ -88,9 +93,37 @@ export interface TikTokOptions {
   brandOrganic?: boolean;
   isAigc?: boolean;
 }
+export interface FacebookOptions {
+  /** URL shown as a link preview on text posts. */
+  link?: string;
+  /** A Facebook Page or place id to tag on the post. */
+  locationId?: string;
+  /** Facebook Page ids to mention, separated by commas. */
+  mentionPageIds?: string;
+  /** Selected Pages placed inline in `text` as @PageName. PostLake sends the
+   * corresponding Facebook mention token at that exact position. */
+  mentionPages?: { id: string; name: string }[];
+}
+
+/** A Facebook Page live broadcast. Facebook returns its secure ingest URL,
+ * and may return a separate key, only when it is created. */
+export interface LiveBroadcast {
+  id: string;
+  platform: Platform;
+  title: string;
+  description: string | null;
+  status: string;
+  plannedStartAt: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  url: string | null;
+  streamUrl?: string;
+  streamKey?: string;
+}
 export interface PlatformOptions {
   pinterest?: PinterestOptions;
   tiktok?: TikTokOptions;
+  facebook?: FacebookOptions;
 }
 
 export interface CreatePostInput {
@@ -108,6 +141,9 @@ export interface CreatePostInput {
   /** Posted as a reply the moment the post goes live, where the network allows it. */
   firstComment?: string;
   platformOptions?: PlatformOptions;
+  /** Refuse the entire send before contacting a network if any selected target
+   * cannot pass PostLake's deterministic preflight. Defaults to partial fan-out. */
+  requireAllTargets?: boolean;
   /** Save without sending. Prefer `posts.draft()`, which sets this for you. */
   draft?: boolean;
 }
@@ -115,6 +151,9 @@ export interface CreatePostInput {
 export interface PostTarget {
   account: string;
   platform: Platform;
+  /** Identity captured when the target was scheduled. It lets PostLake repair
+   * a reconnection only when it is demonstrably the same destination. */
+  connection?: { platformAccountId?: string; destinationId?: string; destinationName?: string; handle?: string };
   state: TargetState;
   remoteId: string | null;
   url: string | null;
@@ -125,6 +164,18 @@ export interface PostTarget {
 export interface Post {
   id: string;
   state: PostState;
+  /** Stable API key or OAuth principal that created this post. Absent for a
+   *  human-created dashboard post. */
+  clientId?: string;
+  /** Where the post entered PostLake, independent of who created it. */
+  surface?: "dashboard" | "api" | "agent";
+  approval?: {
+    requestedAt: string;
+    decision?: "approved" | "rejected";
+    decidedAt?: string;
+    decidedBy?: string;
+    reason?: string;
+  };
   createdAt: string;
   scheduledAt: string | null;
   timezone?: string;
@@ -136,6 +187,25 @@ export interface Post {
   platformOptions?: PlatformOptions;
   warnings?: string[];
   targets: PostTarget[];
+}
+
+export interface PostListParams {
+  /** Case-insensitive literal caption search, up to 200 characters. */
+  q?: string;
+  limit?: number;
+  cursor?: string;
+  state?: PostState;
+  account?: string;
+  profile?: string;
+  network?: Platform;
+  /** A stable principal id, `any` for machine-created posts, or `manual`. */
+  agent?: string;
+  surface?: "dashboard" | "api" | "agent";
+  approval?: "pending" | "approved" | "rejected";
+  /** ISO 8601 date or timestamp, inclusive. */
+  from?: string;
+  /** ISO 8601 date or timestamp, inclusive. */
+  to?: string;
 }
 
 export interface ConnectedAccount {
@@ -223,6 +293,24 @@ export interface WebhookEndpoint {
   /** Present only in the create response, once. */
   secret?: string;
   createdAt: string;
+}
+
+export interface WebhookDelivery {
+  id: string;
+  endpoint: Omit<WebhookEndpoint, "secret">;
+  event: { id: string; type: WebhookEventType; createdAt: string; data: unknown };
+  attempts: number;
+  nextAttemptAt: string;
+  status: "pending" | "dead";
+}
+
+export interface ChangelogEntry {
+  date: string;
+  type: string;
+  title: string;
+  summary: string;
+  details: string[];
+  links?: Array<{ label: string; href: string }>;
 }
 
 export interface Account {
@@ -432,6 +520,10 @@ export interface ConnectVariant {
 /** What one network supports: limits, media rules, and every platformOptions
  *  field with its valid values. Read this rather than hard-coding a limit. */
 export interface PlatformCapabilities {
+  connectionAvailability?: {
+    status: "public" | "limited";
+    reason: "provider_app_review" | "not_publicly_available" | null;
+  };
   platform: Platform;
   displayName: string;
   maxChars: number;
@@ -449,6 +541,7 @@ export interface PlatformCapabilities {
     maxVideoSeconds?: number;
   };
   postsPerDay?: number;
+  postsPerDayScope?: "account" | "app";
   asyncPublish?: boolean;
   firstComment?: boolean;
   deletePost?: boolean;
@@ -510,6 +603,18 @@ export interface Limits {
     plan?: string;
     blockedPlatforms?: string[];
   };
+  /** Billing state separate from the product tier. `payg` means Free with
+   * purchased, non-renewing credits rather than a subscription. */
+  billing?: {
+    mode: "free" | "payg" | "subscription";
+    isSubscriber: boolean;
+    hasPurchasedCredits: boolean;
+  };
+  rateLimits?: {
+    apiPerMinute: number;
+    postsPerMinute: number;
+    profile: { apiPerMinute: number; postsPerMinute: number };
+  };
   [key: string]: unknown;
 }
 
@@ -549,7 +654,9 @@ export type WebhookEventType =
   | "post.partial"
   | "post.failed"
   | "post.processing"
+  | "webhook.test"
   | "account.connected"
+  | "account.disconnected"
   | "message.received"
   | "comment.received"
   | "mention.received";
@@ -569,17 +676,22 @@ export interface MessageReceived {
   replyBy: string;
 }
 
-/** A creator surfaced by a network's creator marketplace. `sample` is true when
- *  the network returned simulated test data rather than a real person, which it
- *  does until the app has Advanced Access. */
+/** A creator surfaced by a network's creator marketplace. `sample` stays true
+ *  until PostLake has Meta Advanced Access configured, so callers never act on
+ *  test data as though it were a real person. */
 export interface MarketplaceCreator {
   id: string;
   handle: string;
   displayName: string | null;
   avatarUrl: string | null;
-  followers: number | null;
   bio: string | null;
   categories: string[];
+  country: string | null;
+  portfolioUrl: string | null;
+  platforms: string[];
+  verified: boolean | null;
+  hasBrandPartnershipExperience: boolean | null;
+  followsBrand: boolean | null;
   sample: boolean;
 }
 
